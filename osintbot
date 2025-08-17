@@ -337,6 +337,81 @@ async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🆘 New Feedback from {user_id}:\n{feedback}",
         parse_mode="HTML"
     )
+async def dashboard_message(user_id):
+    u = db_get_user(user_id)
+    rank = get_user_rank(user_id)
+    badge = u.get('badge', '')
+    history = db_get_history(user_id)
+    protected_count = cur.execute("SELECT COUNT(*) FROM protected").fetchone()[0]
+    msg = (
+        f"<b>📊 Your Dashboard</b>\n"
+        f"Credits: <code>{u['credits']}</code>\n"
+        f"Rank: <code>{rank}</code>\n"
+        f"Badge: {badge}\n"
+        f"Sudo: <code>{'Yes' if u['sudo'] else 'No'}</code>\n"
+        f"Total Searches: <code>{len(history)}</code>\n"
+        f"Protected Numbers: <code>{protected_count}</code>\n"
+        f"Use /history to view searches.\nUse /clearhistory to clear searches."
+    )
+    return msg
+def help_message():
+    return (
+        "<b>OSINT PRO MAX BOT — Help</b>\n"
+        "/mobile <code>number</code> — Lookup mobile info\n"
+        "/vehicle <code>numberPlate</code> — Lookup vehicle info\n"
+        "/myinfo — Your dashboard (stats, badge, credits)\n"
+        "/history — View your search history\n"
+        "/clearhistory — Clear search history\n"
+        "/report <text> — Send feedback/bug\n"
+        "/refer — Get your referral link\n"
+        "/about — Info about this bot\n"
+        "/github — Project info\n"
+        "/ping — Bot uptime\n"
+        "\n<b>Admin Only:</b>\n"
+        "/addcredits <id> <amt>, /resetcredits <id>\n"
+        "/addsudo <id>, /removesudo <id>\n"
+        "/protect <num>, /unprotect <num>, /doneprotect <num>\n"
+        "/ban <id>, /unban <id>\n"
+        "/stats, /logs, /sudolist, /usercredits <id>, /userinfo <id>\n"
+        "/broadcast <message>, /apicheck\n"
+        "—\n"
+        "<i>Use dashboard and menu for quick access!</i>\n"
+        "Powered by @TheSupremeOG"
+    )
+
+def admin_panel_message():
+    return (
+        "<b>👑 Admin Panel</b>\n"
+        "/addcredits <code>user_id</code> <code>amt</code>: Add credits\n"
+        "/addsudo <code>user_id</code>: Add sudo user\n"
+        "/removesudo <code>user_id</code>: Remove sudo\n"
+        "/resetcredits <code>user_id</code>: Reset credits\n"
+        "/protect <code>num</code>: Protect (hide) number\n"
+        "/unprotect <code>num</code>: Unprotect (unhide) number\n"
+        "/doneprotect <code>num</code>: Owner verified protection\n"
+        "/ban <code>user_id</code>, /unban <code>user_id</code>\n"
+        "/broadcast <msg>: Send message to all users\n"
+        "/apicheck: Check API health\n"
+        "/logs [N]: View last N searches\n"
+        "—\n"
+        "Powered by @TheSupremeOG"
+    )
+
+def about_text():
+    return (
+        "🤖 <b>OSINT PRO MAX BOT</b>\n"
+        "OSINT/data search for mobile/vehicle. "
+        "Developed and powered by @TheSupremeOG.\n"
+        "Safe, private, and feature-rich lookup.\n"
+        "Contact: <a href='https://t.me/SexiestOFT'>Admin</a>"
+    )
+
+def github_text():
+    return (
+        "🌐 <b>Project Repository</b>\n"
+        "🔒 This bot's source is PRIVATE.\n"
+        "Contact @TheSupremeOG for inquiries or issues."
+    )
 
 async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
