@@ -820,8 +820,6 @@ def main():
     app.add_handler(CommandHandler("logs", logs))
     app.add_handler(CallbackQueryHandler(joined_button, pattern="^joined$"))
     app.add_handler(CallbackQueryHandler(main_menu_handler))
-    app.add_handler(CallbackQueryHandler(send_leaderboard, pattern="^leaderboard$"))
-    app.add_handler(CallbackQueryHandler(send_referral_info, pattern="^refer$"))
     print("✅ Bot running...")
     app.run_polling()
 
