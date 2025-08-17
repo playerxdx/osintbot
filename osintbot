@@ -1,0 +1,792 @@
+import logging
+import requests
+import sqlite3
+import time
+import csv
+from collections import defaultdict
+from io import StringIO
+
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+)
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+)
+from telegram.request import HTTPXRequest
+
+# ===== CONFIG =====
+BOT_TOKEN = "8460847299:AAGNJ_ITT00po1iHSgqVRTfNQC09DUWjg44"
+LOG_CHANNEL_ID = -1003010943545
+PAYMENT_LINK = "https://t.me/SexiestOFT"
+ADMIN_ID = 7924074157
+FREE_LIMIT = 3
+HIDDEN_NUMBERS = ["7724814462", "9424977646", "7000997189", "7000996857", "8370037172"]
+PERMANENT_SUDOS = {7744872859, 8111878089, 7254071659, 5270887665}
+JOIN_CHANNELS = ["@AakashPosts", "@FRIENDS_CHATTING_gROUP_IND"]
+MOBILE_API = "https://yourgpl.store/api/akash/mobile.php?mobile="
+VEHICLE_API = "https://yourgpl.store/api/akash/gari.php?numberPlate="
+RATE_LIMIT_SECONDS = 4
+BOT_START_TIME = time.time()
+
+# ===== DATABASE SETUP =====
+conn = sqlite3.connect('osintbot.db', check_same_thread=False)
+cur = conn.cursor()
+
+def init_db():
+    cur.execute('''CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        credits INTEGER DEFAULT ?,
+        sudo INTEGER DEFAULT 0,
+        banned INTEGER DEFAULT 0,
+        first_name TEXT,
+        username TEXT,
+        lang TEXT,
+        join_date TEXT,
+        referrer INTEGER DEFAULT 0,
+        badge TEXT DEFAULT ''
+    )''', (FREE_LIMIT,))
+    cur.execute('''CREATE TABLE IF NOT EXISTS search_history (
+        user_id INTEGER,
+        query TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS protected (
+        number TEXT PRIMARY KEY
+    )''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS feedback (
+        user_id INTEGER,
+        text TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+    conn.commit()
+    for sudo in PERMANENT_SUDOS:
+        cur.execute("INSERT OR IGNORE INTO users (user_id, sudo) VALUES (?, 1)", (sudo,))
+    for n in HIDDEN_NUMBERS:
+        cur.execute("INSERT OR IGNORE INTO protected (number) VALUES (?)", (n,))
+    conn.commit()
+init_db()
+
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+
+# ===== DB Helpers =====
+def db_add_or_update_user(user_id, first_name='', username='', lang=''):
+    cur.execute("INSERT OR IGNORE INTO users (user_id, join_date) VALUES (?, ?)", (user_id, time.strftime("%Y-%m-%d %H:%M")))
+    cur.execute("UPDATE users SET first_name=?, username=?, lang=? WHERE user_id=?",
+        (first_name, username, lang, user_id))
+    conn.commit()
+
+def db_get_user(user_id):
+    cur.execute("SELECT credits,sudo,banned,first_name,username,lang,join_date,badge,referrer FROM users WHERE user_id=?", (user_id,))
+    row = cur.fetchone()
+    if row:
+        return {'credits': row[0], 'sudo': bool(row[1]), 'banned': bool(row[2]),
+                'first_name': row[3] or '', 'username': row[4] or '',
+                'lang': row[5] or '', 'join_date': row[6] or '', 'badge': row[7] or '',
+                'referrer': row[8] or 0}
+    db_add_or_update_user(user_id)
+    return {'credits': FREE_LIMIT, 'sudo': False, 'banned': False, 'first_name':'', 'username':'', 'lang':'', 'join_date':'', 'badge':'', 'referrer':0}
+
+def db_set_credits(user_id, credits):
+    cur.execute("UPDATE users SET credits=? WHERE user_id=?", (credits, user_id))
+    conn.commit()
+
+def db_add_credits(user_id, amount):
+    u = db_get_user(user_id)
+    new_amt = u['credits'] + amount
+    db_set_credits(user_id, new_amt)
+
+def db_deduct_credit(user_id):
+    u = db_get_user(user_id)
+    if u['credits'] > 0:
+        db_set_credits(user_id, u['credits']-1)
+
+def db_set_sudo(user_id, sudo=True):
+    cur.execute("UPDATE users SET sudo=? WHERE user_id=?", (1 if sudo else 0, user_id))
+    db_add_or_update_user(user_id)
+    conn.commit()
+
+def db_is_admin(user_id):
+    u = db_get_user(user_id)
+    return user_id == ADMIN_ID or u['sudo']
+
+def db_is_sudo(user_id):
+    return db_get_user(user_id)['sudo']
+
+def db_get_sudos():
+    cur.execute("SELECT user_id FROM users WHERE sudo=1")
+    return [x[0] for x in cur.fetchall()]
+
+def db_is_banned(user_id):
+    u = db_get_user(user_id)
+    return u['banned']
+
+def db_ban(user_id, ban=True):
+    cur.execute("UPDATE users SET banned=? WHERE user_id=?", (1 if ban else 0, user_id))
+    db_add_or_update_user(user_id)
+    conn.commit()
+
+def db_add_history(user_id, query):
+    cur.execute("INSERT INTO search_history (user_id, query) VALUES (?, ?)", (user_id, query))
+    conn.commit()
+
+def db_get_history(user_id):
+    cur.execute("SELECT query FROM search_history WHERE user_id=? ORDER BY timestamp DESC", (user_id,))
+    return [row for row in cur.fetchall()]
+
+def db_clear_history(user_id):
+    cur.execute("DELETE FROM search_history WHERE user_id=?", (user_id,))
+    conn.commit()
+
+def db_is_protected(number):
+    cur.execute("SELECT 1 FROM protected WHERE number=?", (number,))
+    return bool(cur.fetchone())
+
+def db_protect(number):
+    cur.execute("INSERT OR IGNORE INTO protected (number) VALUES (?)", (number,))
+    conn.commit()
+
+def db_unprotect(number):
+    cur.execute("DELETE FROM protected WHERE number=?", (number,))
+    conn.commit()
+
+def db_stats():
+    cur.execute("SELECT COUNT(*) FROM users")
+    total_users = cur.fetchone()
+    cur.execute("SELECT COUNT(*) FROM search_history")
+    total_lookups = cur.fetchone()
+    cur.execute("SELECT SUM(credits) FROM users")
+    total_credits = cur.fetchone() or 0
+    cur.execute("SELECT COUNT(*) FROM users WHERE sudo=1")
+    sudos = cur.fetchone()
+    cur.execute("SELECT COUNT(*) FROM protected")
+    prot = cur.fetchone()
+    return total_users, total_lookups, total_credits, sudos, prot
+
+def db_recent_logs(n=10):
+    cur.execute("SELECT user_id, query, timestamp FROM search_history ORDER BY timestamp DESC LIMIT ?", (n,))
+    return cur.fetchall()
+
+def db_leaderboard(n=5):
+    cur.execute("""
+        SELECT user_id, COUNT(*) as total 
+        FROM search_history 
+        GROUP BY user_id 
+        ORDER BY total DESC LIMIT ?""", (n,))
+    return cur.fetchall()
+
+def db_top_referrers(n=5):
+    cur.execute("""
+        SELECT referrer, COUNT(*) as total FROM users 
+        WHERE referrer <> 0 
+        GROUP BY referrer ORDER BY total DESC LIMIT ?""", (n,))
+    return cur.fetchall()
+
+def db_add_feedback(user_id, text):
+    cur.execute("INSERT INTO feedback (user_id, text) VALUES (?,?)", (user_id,text))
+    conn.commit()
+
+def db_set_referrer(newuser, refid):
+    cur.execute("UPDATE users SET referrer=? WHERE user_id=?", (refid, newuser))
+    conn.commit()
+
+def db_user_count():
+    cur.execute("SELECT COUNT(*) FROM users")
+    return cur.fetchone()[0]
+
+def db_get_badge(user_id):
+    cur.execute("SELECT badge FROM users WHERE user_id=?", (user_id,))
+    r = cur.fetchone()
+    return r if r else ''
+
+def db_set_badge(user_id, badge):
+    cur.execute("UPDATE users SET badge=? WHERE user_id=?", (badge, user_id))
+    conn.commit()
+
+# ============== Rate Limiting ==============
+USER_LAST_COMMAND = defaultdict(float)
+def is_rate_limited(user_id):
+    now = time.time()
+    if now - USER_LAST_COMMAND[user_id] < RATE_LIMIT_SECONDS:
+        return True
+    USER_LAST_COMMAND[user_id] = now
+    return False
+
+def get_user_rank(user_id):
+    searches = len(db_get_history(user_id))
+    if searches < 10: return "🔰 Newbie"
+    elif searches < 50: return "⚡ Explorer"
+    elif searches < 150: return "🔥 Power User"
+    else: return "👑 Elite"
+
+# ========== UI Buttons ==========
+def build_main_keyboard(user_id):
+    buttons = [
+        [InlineKeyboardButton("📱 Mobile Lookup", callback_data="mobile"),
+         InlineKeyboardButton("🚗 Vehicle Lookup", callback_data="vehicle")],
+        [InlineKeyboardButton("💳 Buy Credits", callback_data="buy")],
+        [InlineKeyboardButton("📢 Help", callback_data="help")],
+        [InlineKeyboardButton("📊 Dashboard", callback_data="dashboard")],
+        [InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard"),
+         InlineKeyboardButton("🎁 Refer", callback_data="refer")],
+        [InlineKeyboardButton("ℹ️ About", callback_data="about"),
+         InlineKeyboardButton("🌐 GitHub", callback_data="github")]
+    ]
+    if db_is_admin(user_id):
+        buttons.append([InlineKeyboardButton("👑 Admin Panel", callback_data="admin")])
+    return InlineKeyboardMarkup(buttons)
+
+def build_back_keyboard(location="main", user_id=None):
+    cb_data = "mainmenu" if location == "main" else location
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=cb_data)]])
+
+def build_join_keyboard():
+    rows = [[InlineKeyboardButton(f"Join {channel}", url=f"https://t.me/{channel[1:]}")] for channel in JOIN_CHANNELS]
+    rows.append([InlineKeyboardButton("✅ I Joined", callback_data="joined")])
+    return InlineKeyboardMarkup(rows)
+
+async def check_joined(user_id, bot):
+    for channel in JOIN_CHANNELS:
+        try:
+            member = await bot.get_chat_member(channel, user_id)
+            if member.status not in ("member", "administrator", "creator"):
+                return False
+        except Exception:
+            return False
+    return True
+
+async def send_with_credit(update, text, reply_markup=None, parse_mode="HTML"):
+    credit = "\n\nPowered by <a href='https://t.me/TheSupremeOG'>@TheSupremeOG</a>"
+    await update.message.reply_text(text + credit, reply_markup=reply_markup, parse_mode=parse_mode)
+
+async def callback_with_credit(query, text, reply_markup=None, parse_mode="HTML"):
+    credit = "\n\nPowered by <a href='https://t.me/TheSupremeOG'>@TheSupremeOG</a>"
+    try:
+        await query.edit_message_text(text + credit, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception:
+        await query.message.reply_text(text + credit, reply_markup=reply_markup, parse_mode=parse_mode)
+
+# ==== FORMATTED API RESULT ====
+def format_api_result(result: dict, title: str = "") -> str:
+    lines = []
+    if title:
+        lines.append(f"<b>{title}</b>\n")
+    # Prioritize common keys
+    pri_keys = ["Name", "Carrier", "Circle", "SIM", "Owner", "Model", "Regn Date", "VehicleType"]
+    for k in pri_keys:
+        if k in result and result[k]:
+            lines.append(f"• <b>{k}:</b> <code>{result[k]}</code>")
+    for key in sorted(result):
+        if key not in pri_keys and result[key]:
+            lines.append(f"• <b>{key}:</b> <code>{result[key]}</code>")
+    lines.append("\n🔗 <i>All data fetched live • Powered by @TheSupremeOG</i>")
+    return "\n".join(lines)
+
+# ==== COMMANDS IMPLEMENTATION ====
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id
+    if db_is_banned(user_id):
+        await send_with_credit(update, "❌ You are banned from using this bot.")
+        return
+    # Add or update user
+    db_add_or_update_user(user_id, user.first_name or "", user.username or "", user.language_code or "")
+    joined = await check_joined(user_id, context.bot)
+    if not joined:
+        await update.message.reply_text("🚦 To use this bot, join all channels first:", reply_markup=build_join_keyboard())
+        return
+    u = db_get_user(user_id)
+    msg = (
+        f"<b>😎 Welcome {user.first_name}!</b>\n"
+        "🧊 <i>Your one-stop for leaked & breached data lookups.</i>\n\n"
+        f"💎 <b>Credits left:</b> <code>{u['credits']}</code>\n"
+        "💰 <b>Pricing:</b> ₹100 per full info.\n"
+        "🔒 Your searches are <b>private & secure</b>.\n"
+        "🛡️ Protected numbers always hidden.\n"
+        f"<a href='{PAYMENT_LINK}'>💳 Buy Credits</a> | <a href='{PAYMENT_LINK}'>Contact Admin</a>\n\n"
+        "👑 Admin panel for owners & sudos (/addsudo, /addcredits, /doneprotect)\n"
+        "📢 Type /help for all commands\n\n"
+        "🔥 Start by using Lookup, Dashboard or Help below!"
+    )
+    await update.message.reply_text(msg, parse_mode="HTML", reply_markup=build_main_keyboard(user_id))
+
+async def joined_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    joined = await check_joined(user_id, context.bot)
+    if joined:
+        await callback_with_credit(update.callback_query, "✅ Thanks for joining! Click /start to begin.", reply_markup=build_main_keyboard(user_id))
+    else:
+        await update.callback_query.answer("❌ Please join all channels first.", show_alert=True)
+
+async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    data = query.data
+    if data in ["mainmenu", "back"]:
+        await callback_with_credit(query, "<b>😎 Main Menu</b>", reply_markup=build_main_keyboard(user_id))
+    elif data == "mobile":
+        await callback_with_credit(query, "<b>📱 Mobile Lookup</b>\nUse <code>/mobile number</code>\nExample: <code>/mobile 9876543210</code>", reply_markup=build_back_keyboard("mainmenu", user_id))
+    elif data == "vehicle":
+        await callback_with_credit(query, "<b>🚗 Vehicle Lookup</b>\nUse <code>/vehicle numberPlate</code>\nExample: <code>/vehicle MH12AB1234</code>", reply_markup=build_back_keyboard("mainmenu", user_id))
+    elif data == "buy":
+        await callback_with_credit(query, f"<b>💳 Buy Credits</b>\nInstant delivery.\nPay: <a href='{PAYMENT_LINK}'>Buy here</a>", reply_markup=build_back_keyboard("mainmenu", user_id))
+    elif data == "help":
+        await callback_with_credit(query, help_message(), reply_markup=build_back_keyboard("mainmenu", user_id))
+    elif data == "dashboard":
+        await callback_with_credit(query, await dashboard_message(user_id), reply_markup=build_back_keyboard("mainmenu", user_id))
+    elif data == "leaderboard":
+        await send_leaderboard(query, user_id)
+    elif data == "refer":
+        await send_referral_info(query, user_id)
+    elif data == "admin":
+        if db_is_admin(user_id):
+            await callback_with_credit(query, admin_panel_message(), reply_markup=build_back_keyboard("mainmenu", user_id))
+        else:
+            await query.answer("Not allowed!", show_alert=True)
+    elif data == "about":
+        await callback_with_credit(query, about_text(), reply_markup=build_back_keyboard("mainmenu", user_id))
+    elif data == "github":
+        await callback_with_credit(query, github_text(), reply_markup=build_back_keyboard("mainmenu", user_id))
+    else:
+        await query.answer("Unknown option!", show_alert=True)
+
+async def mobile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id
+    if is_rate_limited(user_id):
+        await send_with_credit(update, "⏳ Please wait a few seconds before your next lookup.")
+        return
+    if db_is_banned(user_id):
+        await send_with_credit(update, "❌ You are banned.")
+        return
+    if db_get_user(user_id)['credits'] <= 0 and not db_is_admin(user_id):
+        await send_with_credit(update, f"❌ You need credits. Buy: <a href='{PAYMENT_LINK}'>here</a>")
+        return
+    if not context.args:
+        await send_with_credit(update, "Usage: /mobile <number>")
+        return
+    number = context.args[0]
+    if db_is_protected(number):
+        await send_with_credit(update, "❌ This number is protected.")
+        return
+    await update.message.reply_text("🔍 Searching mobile info...", parse_mode="HTML")
+    try:
+        response = requests.get(MOBILE_API + number, timeout=20)
+        result = response.json()
+        text = format_api_result(result, f"📱 Mobile Info: {number}")
+        await send_with_credit(update, text)
+        await context.bot.send_message(LOG_CHANNEL_ID, f"User {user_id} searched mobile: {number}")
+        db_add_history(user_id, f"mobile: {number}")
+        if not db_is_admin(user_id):
+            db_deduct_credit(user_id)
+    except Exception as e:
+        await send_with_credit(update, f"❌ Error: {e}")
+
+async def vehicle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id
+    if is_rate_limited(user_id):
+        await send_with_credit(update, "⏳ Please wait a few seconds before your next lookup.")
+        return
+    if db_is_banned(user_id):
+        await send_with_credit(update, "❌ You are banned.")
+        return
+    if db_get_user(user_id)['credits'] <= 0 and not db_is_admin(user_id):
+        await send_with_credit(update, f"❌ You need credits. Buy: <a href='{PAYMENT_LINK}'>here</a>")
+        return
+    if not context.args:
+        await send_with_credit(update, "Usage: /vehicle <numberPlate>")
+        return
+    plate = context.args[0]
+    await update.message.reply_text("🔍 Searching vehicle info...", parse_mode="HTML")
+    try:
+        response = requests.get(VEHICLE_API + plate, timeout=20)
+        result = response.json()
+        text = format_api_result(result, f"🚗 Vehicle Info: {plate}")
+        await send_with_credit(update, text)
+        await context.bot.send_message(LOG_CHANNEL_ID, f"User {user_id} searched vehicle: {plate}")
+        db_add_history(user_id, f"vehicle: {plate}")
+        if not db_is_admin(user_id):
+            db_deduct_credit(user_id)
+    except Exception as e:
+        await send_with_credit(update, f"❌ Error: {e}")
+
+async def myinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    u = db_get_user(user_id)
+    rank = get_user_rank(user_id)
+    badge = u.get('badge', '')
+    history = db_get_history(user_id)
+    protected_count = cur.execute("SELECT COUNT(*) FROM protected").fetchone()[0]
+    msg = (
+        f"<b>📊 Your Dashboard</b>\n"
+        f"Credits: <code>{u['credits']}</code>\n"
+        f"Rank: <code>{rank}</code>\n"
+        f"Badge: {badge}\n"
+        f"Sudo: <code>{'Yes' if u['sudo'] else 'No'}</code>\n"
+        f"Total Searches: <code>{len(history)}</code>\n"
+        f"Protected Numbers: <code>{protected_count}</code>\n"
+        f"Use /history to view searches.\nUse /clearhistory to clear searches."
+    )
+    await send_with_credit(update, msg)
+
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    history = db_get_history(user_id)
+    if not history:
+        await send_with_credit(update, "🔎 No searches yet!")
+        return
+    msg = "<b>Your Search History:</b>\n" + "\n".join(f"{idx+1}. {q}" for idx, q in enumerate(history))
+    await send_with_credit(update, msg)
+
+async def clearhistory_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    db_clear_history(user_id)
+    await send_with_credit(update, "✅ Search history cleared.")
+
+async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_with_credit(update, "🤖 <b>OSINT PRO MAX BOT</b>\n🛠️ By @TheSupremeOG\n")
+
+async def github(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_with_credit(update, "🌐 <b>Project Repository</b>\n🔒 This bot's source is private.\nContact @TheSupremeOG")
+
+async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uptime = int(time.time() - BOT_START_TIME)
+    mins = uptime // 60
+    await send_with_credit(update, f"🏓 Pong! Bot is alive. ({mins} minutes uptime)")
+
+async def refer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id
+    # Prepare referral link
+    link = f"https://t.me/{(await context.bot.get_me()).username}?start=ref_{user_id}"
+    msg = (f"🎁 <b>Referral Program</b>\n"
+           f"Share your referral link with friends:\n{link}\n"
+           "You and your friends will earn bonus credits when they use the bot!")
+    await send_with_credit(update, msg)
+
+# Referral on start via param
+async def handle_start_param(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id
+    db_add_or_update_user(user_id, user.first_name or "", user.username or "", user.language_code or "")
+    args = context.args
+    if args:
+        code = args[0]
+        if code.startswith("ref_"):
+            try:
+                ref_id = int(code.split("_")[1])
+                if ref_id != user_id and not db_get_user(user_id).get("referrer", 0):
+                    db_set_referrer(user_id, ref_id)
+                    db_add_credits(ref_id, 1)  # Add 1 credit to referrer
+                    db_add_credits(user_id, 1)  # Add 1 credit to referred
+            except Exception:
+                pass
+    await start(update, context)
+
+# ========== Admin functions (addsudo, removesudo, etc.) ==========
+
+async def addsudo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not db_is_admin(user_id):
+        await send_with_credit(update, "❌ Only admins can add sudo.")
+        return
+    if not context.args:
+        await send_with_credit(update, "Usage: /addsudo <user_id>")
+        return
+    try:
+        new_sudo = int(context.args[0])
+        db_set_sudo(new_sudo, True)
+        await send_with_credit(update, f"✅ Added sudo: {new_sudo}")
+    except Exception:
+        await send_with_credit(update, "❌ Invalid user id.")
+
+async def removesudo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not db_is_admin(user_id):
+        await send_with_credit(update, "❌ Only admins can remove sudo.")
+        return
+    if not context.args:
+        await send_with_credit(update, "Usage: /removesudo <user_id>")
+        return
+    try:
+        rem_sudo = int(context.args)
+        db_set_sudo(rem_sudo, False)
+        await send_with_credit(update, f"✅ Removed sudo: {rem_sudo}")
+    except Exception:
+        await send_with_credit(update, "❌ Invalid user id.")
+
+async def addcredits(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not db_is_admin(user_id):
+        await send_with_credit(update, "❌ Only admins can add credits.")
+        return
+    if len(context.args) < 2:
+        await send_with_credit(update, "Usage: /addcredits <user_id> <amount>")
+        return
+    try:
+        target = int(context.args)
+        amount = int(context.args[1])
+        db_add_credits(target, amount)
+        await send_with_credit(update, f"✅ Added {amount} credits to {target}")
+    except Exception:
+        await send_with_credit(update, "❌ Error adding credits.")
+
+async def resetcredits(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not db_is_admin(user_id):
+        await send_with_credit(update, "❌ Only admins can reset credits.")
+        return
+    if not context.args:
+        await send_with_credit(update, "Usage: /resetcredits <user_id>")
+        return
+    try:
+        target = int(context.args)
+        db_set_credits(target, FREE_LIMIT)
+        await send_with_credit(update, f"✅ Reset credits for {target}")
+    except Exception:
+        await send_with_credit(update, "❌ Error resetting credits.")
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not db_is_admin(update.effective_user.id):
+        await send_with_credit(update, "❌ Only admins can view stats.")
+        return
+    total_users, total_lookups, total_credits, total_sudos, prot = db_stats()
+    msg = (
+        f"📊 <b>Bot Stats</b>\n"
+        f"Total Users: <code>{total_users}</code>\n"
+        f"Total Lookups: <code>{total_lookups}</code>\n"
+        f"Total Credits Distributed: <code>{total_credits}</code>\n"
+        f"Sudo Users: <code>{total_sudos}</code>\n"
+        f"Protected Numbers: <code>{prot}</code>\n"
+        "Powered by @TheSupremeOG"
+    )
+    await send_with_credit(update, msg)
+
+async def sudolist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not db_is_admin(update.effective_user.id):
+        await send_with_credit(update, "❌ Only admins can use this.")
+        return
+    sudos = db_get_sudos()
+    await send_with_credit(update, "Sudo Users:\n" + "\n".join(str(uid) for uid in sudos))
+
+async def usercredits(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not db_is_admin(update.effective_user.id):
+        await send_with_credit(update, "❌ Only admins can use this.")
+        return
+    if not context.args:
+        await send_with_credit(update, "Usage: /usercredits <user_id>")
+        return
+    try:
+        uid = int(context.args[0])
+        creds = db_get_user(uid)["credits"]
+        await send_with_credit(update, f"User {uid} has {creds} credits.")
+    except:
+        await send_with_credit(update, "❌ Invalid user id.")
+
+async def userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not db_is_admin(update.effective_user.id):
+        await send_with_credit(update, "❌ Only admins can use this.")
+        return
+    if not context.args:
+        await send_with_credit(update, "Usage: /userinfo <user_id>")
+        return
+    try:
+        uid = int(context.args)
+        user = db_get_user(uid)
+        badge = user.get("badge", "")
+        msg = (
+            f"<b>User Info:</b>\n"
+            f"ID: <code>{uid}</code>\n"
+            f"Credits: <code>{user['credits']}</code>\n"
+            f"Sudo: <code>{'Yes' if user['sudo'] else 'No'}</code>\n"
+            f"Banned: <code>{'Yes' if user['banned'] else 'No'}</code>\n"
+            f"First Name: {user.get('first_name','')}\n"
+            f"Username: @{user.get('username','')}\n"
+            f"Language: {user.get('lang','')}\n"
+            f"Join Date: {user.get('join_date','')}\n"
+            f"Badge: {badge}\n"
+            f"Total Searches: <code>{len(db_get_history(uid))}</code>\n"
+            "Powered by @TheSupremeOG"
+        )
+        await send_with_credit(update, msg)
+    except:
+        await send_with_credit(update, "❌ Invalid user id.")
+
+async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not db_is_admin(update.effective_user.id):
+        await send_with_credit(update, "❌ Only admins can ban.")
+        return
+    if not context.args:
+        await send_with_credit(update, "Usage: /ban <user_id>")
+        return
+    try:
+        uid = int(context.args[0])
+        db_ban(uid, True)
+        await send_with_credit(update, f"✅ User {uid} banned.")
+    except:
+        await send_with_credit(update, "❌ Error banning user.")
+
+async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not db_is_admin(update.effective_user.id):
+        await send_with_credit(update, "❌ Only admins can unban.")
+        return
+    if not context.args:
+        await send_with_credit(update, "Usage: /unban <user_id>")
+        return
+    try:
+        uid = int(context.args)
+        db_ban(uid, False)
+        await send_with_credit(update, f"✅ User {uid} unbanned.")
+    except:
+        await send_with_credit(update, "❌ Error unbanning user.")
+
+async def protect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not db_is_admin(update.effective_user.id):
+        await send_with_credit(update, "❌ Only admins can protect numbers.")
+        return
+    if len(context.args) != 1:
+        await send_with_credit(update, "Usage: /protect <number>")
+        return
+    number = context.args
+    db_protect(number)
+    await send_with_credit(update, f"✅ Number protected: {number}")
+
+async def unprotect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not db_is_admin(update.effective_user.id):
+        await send_with_credit(update, "❌ Only admins can unprotect numbers.")
+        return
+    if len(context.args) != 1:
+        await send_with_credit(update, "Usage: /unprotect <number>")
+        return
+    number = context.args
+    db_unprotect(number)
+    await send_with_credit(update, f"✅ Number unprotected: {number}")
+
+async def doneprotect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not db_is_admin(update.effective_user.id):
+        await send_with_credit(update, "❌ Only owner can verify protection.")
+        return
+    if not context.args:
+        await send_with_credit(update, "Usage: /doneprotect <number>")
+        return
+    number = context.args
+    db_protect(number)
+    await send_with_credit(update, f"✅ Number {number} is now protected.")
+
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not db_is_admin(update.effective_user.id):
+        await send_with_credit(update, "❌ Only admins can broadcast.")
+        return
+    if not context.args:
+        await send_with_credit(update, "Usage: /broadcast <message>")
+        return
+    msg = " ".join(context.args) + "\n\nPowered by @TheSupremeOG"
+    cur.execute("SELECT user_id FROM users")
+    uids = cur.fetchall()
+    for (uid,) in uids:
+        try:
+            await update.get_bot().send_message(uid, msg, parse_mode="HTML")
+        except:
+            pass
+    await send_with_credit(update, "✅ Broadcast sent.")
+
+async def logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not db_is_admin(update.effective_user.id):
+        await send_with_credit(update, "❌ Only admins can view logs.")
+        return
+    n = int(context.args[0]) if context.args else 5
+    logs = db_recent_logs(n)
+    if not logs:
+        await send_with_credit(update, "No logs found.")
+        return
+    text = "<b>Last Searches:</b>\n"
+    for uid, q, ts in logs:
+        text += f"{ts} | <code>{uid}</code>: {q}\n"
+    await send_with_credit(update, text)
+
+async def apicheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not db_is_admin(update.effective_user.id):
+        await send_with_credit(update, "❌ Only admins can check APIs.")
+        return
+    msg = "<b>API Health Check:</b>\n"
+    try:
+        r1 = requests.get(MOBILE_API + "9999999999", timeout=10)
+        msg += f"Mobile API: {'✅ OK' if r1.ok else '❌ DOWN'}\n"
+    except:
+        msg += "Mobile API: ❌ DOWN\n"
+    try:
+        r2 = requests.get(VEHICLE_API + "MH12AB1234", timeout=10)
+        msg += f"Vehicle API: {'✅ OK' if r2.ok else '❌ DOWN'}\n"
+    except:
+        msg += "Vehicle API: ❌ DOWN\n"
+    await send_with_credit(update, msg)
+
+async def send_leaderboard(update_query, user_id):
+    board = db_leaderboard(10)
+    if not board:
+        await callback_with_credit(update_query, "No leaderboard data found.")
+        return
+    msg = "<b>🏆 Top 10 Users by Searches</b>\n"
+    for idx, (uid, total) in enumerate(board, 1):
+        user = db_get_user(uid)
+        uname = user.get('username', '') or 'NoUsername'
+        msg += f"{idx}. 👤 @{uname} — <code>{total}</code> searches\n"
+    await callback_with_credit(update_query, msg, reply_markup=build_back_keyboard("mainmenu", user_id))
+
+async def send_referral_info(update_query, user_id):
+    link = f"https://t.me/{(await update_query._bot.get_me()).username}?start=ref_{user_id}"
+    msg = (
+        "🎁 <b>Referral Program</b>\n"
+        "Invite your friends with this link:\n"
+        f"{link}\n"
+        "Earn 1 credit for every friend who joins and uses the bot."
+    )
+    await callback_with_credit(update_query, msg, reply_markup=build_back_keyboard("mainmenu", user_id))
+
+# Main function
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).request(
+        HTTPXRequest(connect_timeout=10.0, read_timeout=20.0)
+    ).build()
+    # Commands
+    app.add_handler(CommandHandler("start", handle_start_param))
+    app.add_handler(CommandHandler("about", about))
+    app.add_handler(CommandHandler("github", github))
+    app.add_handler(CommandHandler("ping", ping))
+    app.add_handler(CommandHandler("myinfo", myinfo))
+    app.add_handler(CommandHandler("mobile", mobile_command))
+    app.add_handler(CommandHandler("vehicle", vehicle_command))
+    app.add_handler(CommandHandler("history", history_command))
+    app.add_handler(CommandHandler("clearhistory", clearhistory_command))
+    app.add_handler(CommandHandler("report", report))
+    app.add_handler(CommandHandler("refer", refer_command))
+    # Admin commands
+    app.add_handler(CommandHandler("addsudo", addsudo))
+    app.add_handler(CommandHandler("removesudo", removesudo))
+    app.add_handler(CommandHandler("addcredits", addcredits))
+    app.add_handler(CommandHandler("resetcredits", resetcredits))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("sudolist", sudolist))
+    app.add_handler(CommandHandler("usercredits", usercredits))
+    app.add_handler(CommandHandler("userinfo", userinfo))
+    app.add_handler(CommandHandler("ban", ban_command))
+    app.add_handler(CommandHandler("unban", unban_command))
+    app.add_handler(CommandHandler("protect", protect))
+    app.add_handler(CommandHandler("unprotect", unprotect))
+    app.add_handler(CommandHandler("doneprotect", doneprotect))
+    app.add_handler(CommandHandler("broadcast", broadcast))
+    app.add_handler(CommandHandler("apicheck", apicheck))
+    app.add_handler(CommandHandler("logs", logs))
+    app.add_handler(CallbackQueryHandler(joined_button, pattern="^joined$"))
+    app.add_handler(CallbackQueryHandler(main_menu_handler))
+    app.add_handler(CallbackQueryHandler(send_leaderboard, pattern="^leaderboard$"))
+    app.add_handler(CallbackQueryHandler(send_referral_info, pattern="^refer$"))
+    print("✅ Bot running...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
