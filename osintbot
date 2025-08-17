@@ -33,20 +33,21 @@ conn = sqlite3.connect('osintbot.db', check_same_thread=False)
 cur = conn.cursor()
 
 def init_db():
-cur.execute(f'''
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        credits INTEGER DEFAULT {FREE_LIMIT},
-        sudo INTEGER DEFAULT 0,
-        banned INTEGER DEFAULT 0,
-        first_name TEXT,
-        username TEXT,
-        lang TEXT,
-        join_date TEXT,
-        referrer INTEGER DEFAULT 0,
-        badge TEXT DEFAULT ''
-    )
-''')
+    cur.execute(f'''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            credits INTEGER DEFAULT {FREE_LIMIT},
+            sudo INTEGER DEFAULT 0,
+            banned INTEGER DEFAULT 0,
+            first_name TEXT,
+            username TEXT,
+            lang TEXT,
+            join_date TEXT,
+            referrer INTEGER DEFAULT 0,
+            badge TEXT DEFAULT ''
+        )
+    ''')
+    # Additional commands must also be indented:
     cur.execute('''CREATE TABLE IF NOT EXISTS search_history (
         user_id INTEGER,
         query TEXT,
@@ -66,6 +67,7 @@ cur.execute(f'''
     for n in HIDDEN_NUMBERS:
         cur.execute("INSERT OR IGNORE INTO protected (number) VALUES (?)", (n,))
     conn.commit()
+
 init_db()
 
 logging.basicConfig(
