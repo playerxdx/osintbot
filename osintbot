@@ -342,33 +342,53 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
     data = query.data
+
     if data in ["mainmenu", "back"]:
         await callback_with_credit(query, "<b>😎 Main Menu</b>", reply_markup=build_main_keyboard(user_id))
-    elif data == "mobile":
-        await callback_with_credit(query, "<b>📱 Mobile Lookup</b>\nUse <code>/mobile number</code>\nExample: <code>/mobile 9876543210</code>", reply_markup=build_back_keyboard("mainmenu", user_id))
-    elif data == "vehicle":
-        await callback_with_credit(query, "<b>🚗 Vehicle Lookup</b>\nUse <code>/vehicle numberPlate</code>\nExample: <code>/vehicle MH12AB1234</code>", reply_markup=build_back_keyboard("mainmenu", user_id))
-    elif data == "buy":
-        await callback_with_credit(query, f"<b>💳 Buy Credits</b>\nInstant delivery.\nPay: <a href='{PAYMENT_LINK}'>Buy here</a>", reply_markup=build_back_keyboard("mainmenu", user_id))
-    elif data == "help":
-        await callback_with_credit(query, help_message(), reply_markup=build_back_keyboard("mainmenu", user_id))
+
     elif data == "dashboard":
         await callback_with_credit(query, await dashboard_message(user_id), reply_markup=build_back_keyboard("mainmenu", user_id))
-    elif data == "leaderboard":
-        await send_leaderboard(query, user_id)
-    elif data == "refer":
-        await send_referral_info(query, user_id)
+
     elif data == "admin":
         if db_is_admin(user_id):
             await callback_with_credit(query, admin_panel_message(), reply_markup=build_back_keyboard("mainmenu", user_id))
         else:
             await query.answer("Not allowed!", show_alert=True)
-    elif data == "about":
-        await callback_with_credit(query, about_text(), reply_markup=build_back_keyboard("mainmenu", user_id))
+
+    elif data == "help":
+        await callback_with_credit(query, help_message(), reply_markup=build_back_keyboard("mainmenu", user_id))
+
     elif data == "github":
         await callback_with_credit(query, github_text(), reply_markup=build_back_keyboard("mainmenu", user_id))
+
+    elif data == "about":
+        await callback_with_credit(query, about_text(), reply_markup=build_back_keyboard("mainmenu", user_id))
+
+    elif data == "leaderboard":
+        await send_leaderboard(query, user_id)
+
+    elif data == "refer":
+        await send_referral_info(query, user_id)
+
+    elif data == "mobile":
+        msg = ("<b>📱 Mobile Lookup</b>\n"
+               "Use <code>/mobile number</code> to lookup mobile info.\n"
+               "Example: <code>/mobile 9876543210</code>")
+        await callback_with_credit(query, msg, reply_markup=build_back_keyboard("mainmenu", user_id))
+
+    elif data == "vehicle":
+        msg = ("<b>🚗 Vehicle Lookup</b>\n"
+               "Use <code>/vehicle numberPlate</code> to lookup vehicle info.\n"
+               "Example: <code>/vehicle MH12AB1234</code>")
+        await callback_with_credit(query, msg, reply_markup=build_back_keyboard("mainmenu", user_id))
+
+    elif data == "buy":
+        msg = (f"<b>💳 Buy Credits</b>\nInstant delivery.\nPay using <a href='{PAYMENT_LINK}'>this link</a>")
+        await callback_with_credit(query, msg, reply_markup=build_back_keyboard("mainmenu", user_id))
+
     else:
         await query.answer("Unknown option!", show_alert=True)
+
 
 async def mobile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
