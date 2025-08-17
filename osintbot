@@ -33,9 +33,10 @@ conn = sqlite3.connect('osintbot.db', check_same_thread=False)
 cur = conn.cursor()
 
 def init_db():
-    cur.execute('''CREATE TABLE IF NOT EXISTS users (
+cur.execute(f'''
+    CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
-        credits INTEGER DEFAULT ?,
+        credits INTEGER DEFAULT {FREE_LIMIT},
         sudo INTEGER DEFAULT 0,
         banned INTEGER DEFAULT 0,
         first_name TEXT,
@@ -44,7 +45,8 @@ def init_db():
         join_date TEXT,
         referrer INTEGER DEFAULT 0,
         badge TEXT DEFAULT ''
-    )''', (FREE_LIMIT,))
+    )
+''')
     cur.execute('''CREATE TABLE IF NOT EXISTS search_history (
         user_id INTEGER,
         query TEXT,
