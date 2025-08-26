@@ -15,7 +15,7 @@ from telegram.ext import (
 from telegram.request import HTTPXRequest
 
 # ===== CONFIG =====
-BOT_TOKEN = "8460847299:AAGNJ_ITT00po1iHSgqVRTfNQC09DUWjg44"
+BOT_TOKEN = "8232419089:AAFfxfNIZVk58HnUUHObTV8378qQSGlT-DQ"
 LOG_CHANNEL_ID = -1003010943545
 PAYMENT_LINK = "https://t.me/SexiestOFT"
 ADMIN_ID = 7924074157
